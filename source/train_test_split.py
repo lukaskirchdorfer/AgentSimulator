@@ -1,10 +1,11 @@
 import pandas as pd
 import numpy as np
 import copy
+import random
 import itertools
 from operator import itemgetter
 import pm4py
-import os
+import getopt, sys, os
 
 
 def _sort_log(log):
@@ -82,6 +83,15 @@ def split_data(PATH_LOG, column_names, PATH_LOG_test=None):
     print(f"The train log conisists of {len(set(df_train_big['case_id']))} cases")
     # print(f"The val log conisists of {len(set(df_val['case_id']))} cases")
     print(f"The test log conisists of {len(set(df_test['case_id']))} cases")
+
+    data_dir = os.path.join(os.getcwd(), "input_data", file_name)
+    if not os.path.exists(data_dir):
+    # If it doesn't exist, create the directory
+        os.makedirs(data_dir)
+    train_path_big = os.path.join(data_dir,'train_log_large.csv')
+    test_path = os.path.join(data_dir,'test_log.csv')
+    df_train_big.to_csv(train_path_big, index=False)
+    df_test.to_csv(test_path, index=False)
 
     number_test_cases = len(set(df_test['case_id']))
 
