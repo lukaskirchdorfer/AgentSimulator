@@ -1,0 +1,1 @@
+java -jar jbpt-pm-entropia-1.6.jar -r -rel=examples\log1.xes -ret=examples\automaton.sdfa

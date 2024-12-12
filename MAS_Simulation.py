@@ -26,7 +26,10 @@ from source.extraneous_delays.config import (
     TimerPlacement,
 )
 from source.agent_types.discover_resource_calendar import discover_calendar_per_agent
-from source.petri_net_utils import discover_petri_net_inductive, sample_next_activity, update_marking_after_activity_executed
+from source.petri_net_utils import discover_petri_net_inductive, write_petri_net, sample_next_activity, update_marking_after_transition, sample_next_role, get_stochastic_map, get_custom_stochastic_map
+from source.agent_miner_code.generic_discovery import run_agent_miner
+from source.interaction_probabilities import calculate_agent_handover_probabilities, calculate_agent_handover_probabilities_per_activity
+from source.lstm import prepare_data_lstm, train_lstm_model, predict_next_step
 
 STEPS_TAKEN = []
 
@@ -916,48 +919,6 @@ def check_for_multitasking_number(df, resource_name='agent', start_timestamp='st
     return max_simultaneous_activities
 
 
-def calculate_agent_transition_probabilities(df):
-    # Convert end_timestamp to datetime
-    df['end_timestamp'] = pd.to_datetime(df['end_timestamp'], format='mixed')
-
-    # Sort DataFrame by end_timestamp
-    df = df.sort_values(by=['case_id', 'end_timestamp'])
-
-    # Group by case_id
-    grouped = df.groupby('case_id')
-
-    # Initialize transition count dictionary
-    transition_counts = {}
-
-    agent_counts = {agent: 0 for agent in df['agent'].unique()}
-
-    # Iterate over groups
-    for _, group in grouped:
-        agents = group['agent'].tolist()
-        for i in range(len(agents) - 1):
-            transition = (agents[i], agents[i+1])
-            if transition in transition_counts:
-                transition_counts[transition] += 1
-            else:
-                transition_counts[transition] = 1
-            agent_counts[agents[i]] += 1
-
-    # Calculate transition probabilities
-    total_transitions = sum(transition_counts.values())
-    
-    # Initialize transition probabilities dictionary
-    transition_probabilities = {}
-
-    # Iterate over transitions
-    for transition, count in transition_counts.items():
-        agent_from, agent_to = transition
-        if agent_from not in transition_probabilities:
-            transition_probabilities[agent_from] = {}
-        transition_probabilities[agent_from][agent_to] = count / agent_counts[agent_from]
-
-    return transition_probabilities
-
-
 # end helper functions
 
 class ResourceAgent(Agent):
@@ -1042,15 +1003,21 @@ class ResourceAgent(Agent):
                 self.contractor_agent.case.current_timestamp = current_timestamp + pd.Timedelta(seconds=activity_duration)
                 # add activity to case list to keep track of performed activities per case
                 self.contractor_agent.case.add_activity_to_case(activity)
-                # advance marking in petri net
-                self.contractor_agent.case.marking = update_marking_after_activity_executed(trans=self.contractor_agent.case.sampled_transition, net=self.contractor_agent.case.petri_net, marking=self.contractor_agent.case.marking)
+                self.contractor_agent.case.add_agent_to_case(self.resource)
+                if self.model.lstm_model == None:
+                    # advance marking in petri net
+                    self.contractor_agent.case.current_role_net_marking, self.contractor_agent.case.currently_active_role_net = update_marking_after_transition(trans=self.contractor_agent.case.sampled_transition, 
+                                                    net=self.contractor_agent.case.current_role_net, 
+                                                    marking=self.contractor_agent.case.current_role_net_marking,
+                                                    final_marking=self.contractor_agent.case.current_role_net_final_marking,)
 
                 print(f"Activity performed: {activity} by {self.resource} in case {self.contractor_agent.case.case_id}")
 
                 # set that activity is performed
                 self.contractor_agent.activity_performed = True
-
+                # set agent and role that performed activity
                 self.contractor_agent.case.previous_agent = self.resource
+                self.contractor_agent.case.previous_role = f"a{self.agent_type[-1]}"
 
     
                 # remove activity from additional activities
@@ -1240,7 +1207,7 @@ class ContractorAgent(Agent):
     """
     One contractor agent to assign tasks using the contraction net protocol
     """
-    def __init__(self, unique_id, model, activities, transition_probabilities, agent_activity_mapping, smap):
+    def __init__(self, unique_id, model, activities, transition_probabilities, agent_activity_mapping):
         super().__init__(unique_id, model)
         self.activities = activities
         self.transition_probabilities = transition_probabilities
@@ -1248,35 +1215,44 @@ class ContractorAgent(Agent):
         self.model = model
         self.current_activity_index = None
         self.activity_performed = False
-        self.smap = smap
+        self.next_agent_distribution = None
 
     def step(self, scheduler, agent_keys, cases):
         method = "step"
         agent_keys = agent_keys[1:] # exclude contractor agent here as we only want to perform resource agent steps
-        # 1) sort by specialism
-        # bring the agents in an order to first ask the most specialized agents to not waste agent capacity for future cases -> principle of specialization
-        def get_key_length(key):
-            return len(self.agent_activity_mapping[key])
 
-        # Sort the keys using the custom key function
-        if isinstance(agent_keys[0], list):
-            sorted_agent_keys = []
-            for agent_list in agent_keys:
-                sorted_agent_keys.append(sorted(agent_list, key=get_key_length))
+        # if the local LSTM model is used, the agents are already sorted by the predicted likelihood
+        if self.next_agent_distribution != None:
+            sorted_agent_keys = agent_keys
         else:
-            sorted_agent_keys = sorted(agent_keys, key=get_key_length)
-        # print(f"Agents sorted by specialism: {sorted_agent_keys}")
-        
-        # # 2) sort by next availability
-        sorted_agent_keys = self.sort_agents_by_availability(sorted_agent_keys)
+            # 1) sort by specialism
+            # bring the agents in an order to first ask the most specialized agents to not waste agent capacity for future cases -> principle of specialization
+            def get_key_length(key):
+                return len(self.agent_activity_mapping[key])
+
+            # Sort the keys using the custom key function
+            if isinstance(agent_keys[0], list):
+                sorted_agent_keys = []
+                for agent_list in agent_keys:
+                    sorted_agent_keys.append(sorted(agent_list, key=get_key_length))
+            else:
+                sorted_agent_keys = sorted(agent_keys, key=get_key_length)
+            # print(f"Agents sorted by specialism: {sorted_agent_keys}")
             
-        if self.model.central_orchestration == False:
-            # 3) sort by transition probs
-            current_agent = self.case.previous_agent
-            if current_agent != -1:
-                if current_agent in self.model.agent_transition_probabilities:
-                    current_probabilities = self.model.agent_transition_probabilities[current_agent]
-                sorted_agent_keys = sorted(sorted_agent_keys, key=lambda x: current_probabilities.get(x, 0), reverse=True)
+            # # 2) sort by next availability
+            sorted_agent_keys = self.sort_agents_by_availability(sorted_agent_keys)
+                
+            if self.model.central_orchestration == False:
+                # 3) sort by transition probs
+                current_agent = self.case.previous_agent
+                if current_agent != -1:
+                    current_activity = self.case.activities_performed[-1]
+                    if current_agent in self.model.agent_transition_probabilities:
+                        if current_activity in self.model.agent_transition_probabilities[current_agent]:
+                            current_probabilities = self.model.agent_transition_probabilities[current_agent][current_activity]
+                        else:
+                            current_probabilities = self.model.agent_transition_probabilities[current_agent]
+                    sorted_agent_keys = sorted(sorted_agent_keys, key=lambda x: current_probabilities.get(x, 0), reverse=True)
 
         last_possible_agent = False
 
@@ -1435,150 +1411,100 @@ class ContractorAgent(Agent):
         case_ended = False
 
         current_timestamp = self.case.current_timestamp
-        # self.case.potential_additional_agents = []
 
-        # if case.get_last_activity() == None: # if first activity in case
-        #     # sample starting activity
-        #     sampled_start_act = self.sample_starting_activity()
-        #     current_act = sampled_start_act
-        #     self.new_activity_index = self.activities.index(sampled_start_act)
-        #     next_activity = sampled_start_act
-        #     # print(f"start activity: {next_activity}")
-        # else:
-        #     current_act = case.get_last_activity()
-        #     self.current_activity_index = self.activities.index(current_act)
-
-        #     prefix = self.case.activities_performed
-
-            # if self.model.central_orchestration:
-            #     while tuple(prefix) not in self.transition_probabilities.keys():
-            #         prefix = prefix[1:]
-            #     # Extract activities and probabilities
-            #     activity_list = list(self.transition_probabilities[tuple(prefix)].keys())
-            #     probabilities = list(self.transition_probabilities[tuple(prefix)].values())
-            #     # Sample an activity based on the probabilities
-            #     next_activity = random.choices(activity_list, weights=probabilities, k=1)[0]
-            #     self.new_activity_index = self.activities.index(next_activity)
-            # else:
-            #     while tuple(prefix) not in self.transition_probabilities.keys() or self.case.previous_agent not in self.transition_probabilities[tuple(prefix)].keys():
-            #         prefix = prefix[1:]
-            #     # Extract activities and probabilities
-            #     activity_list = list(self.transition_probabilities[tuple(prefix)][self.case.previous_agent].keys())
-            #     probabilities = list(self.transition_probabilities[tuple(prefix)][self.case.previous_agent].values())
-            #     # Sample an activity based on the probabilities
-            #     next_activity = random.choices(activity_list, weights=probabilities, k=1)[0]
-            #     self.new_activity_index = self.activities.index(next_activity)
         print(f"case id: {self.case.case_id}")
-        if self.case.marking == self.case.final_marking:
-            print("case finished")
-            next_activity = 'zzz_end'
-        # check if next activity is zzz_end
-        # if next_activity == 'zzz_end':
-            potential_agents = None
-            case_ended = True
-            return potential_agents, case_ended#, None, None
 
-        current_act = case.get_last_activity()
-        if current_act != None:
-            self.current_activity_index = self.activities.index(current_act)
-        
-        # determine next activity using petri net
-        sampled_act=None
-        is_final_act = False
-        while sampled_act not in self.activities and is_final_act == False: #self.case.marking != self.case.final_marking:
-            # first sample most likely next activity
-            # the marking is only updated in the Resource Class if an agent actually has time for execution
-            self.case.sampled_transition, is_final_act = sample_next_activity(net=self.case.petri_net, 
-                                    marking=self.case.marking, 
-                                    final_marking=self.case.final_marking, 
-                                    smap=self.smap,
-                                    activities_performed = self.case.activities_performed,
-                                    max_count = self.model.max_activity_count_per_case)
-            print(f"is final: {is_final_act}")
-            # if sampled transition is None (silent transition) then already update marking to prevent infinite loop of silent transitions
-            if self.case.sampled_transition.label == None and is_final_act == False:
-                print("update marking")
-                self.case.marking = update_marking_after_activity_executed(trans=self.case.sampled_transition, 
-                                    net=self.case.petri_net, 
-                                    marking=self.case.marking)
-            elif self.case.sampled_transition.label == None and is_final_act == True:
+        if self.model.lstm_model != None:
+            if case.get_last_activity() == None: # if first activity in case
+                # sample starting activity
+                sampled_start_act = self.sample_starting_activity()
+                current_act = sampled_start_act
+                self.new_activity_index = self.activities.index(sampled_start_act)
+                next_activity = sampled_start_act
+                # print(f"start activity: {next_activity}")
+            else:
+                next_activity, self.next_agent_distribution = predict_next_step(
+                    model=self.model.lstm_model[0], 
+                    activities=self.case.activities_performed, 
+                    resources=self.case.agents_performed, 
+                    activity_encoder=self.model.lstm_model[1], 
+                    resource_encoder=self.model.lstm_model[2], 
+                    )
+
+            # check if next activity is zzz_end
+            if next_activity == 'zzz_end':
                 potential_agents = None
                 case_ended = True
-                return potential_agents, case_ended
-            # transition, self.case.marking = execute_one_transition_in_petri_net(
-            #                         net=self.case.petri_net, 
-            #                         marking=self.case.marking, 
-            #                         final_marking=self.case.final_marking, 
-            #                         smap=self.smap)
-            sampled_act = self.case.sampled_transition.label
-            print(f"sampled activity: {sampled_act}")
-        
-        next_activity = sampled_act
+                return potential_agents, case_ended#, None, None
+        else:
+            # only sample new role if previous one is transitioned to final marking
+            if self.case.currently_active_role_net == False:
+                # step 1: sample next role from i-net and update net marking
+                sampled_role = None
+                not_end_of_i_net = True
+                while sampled_role == None and not_end_of_i_net == True:
+                    sampled_role = sample_next_role(net=self.case.i_net, marking=self.case.i_net_marking, probabilities=self.case.i_net_smap, current_role=self.case.previous_role)
+                    # sampled_role = sample_next_role(net=self.case.i_net, marking=self.case.i_net_marking, smap=self.case.i_net_smap)
+                    self.case.i_net_marking, not_end_of_i_net = update_marking_after_transition(trans=sampled_role, 
+                                                    net=self.case.i_net, 
+                                                    marking=self.case.i_net_marking,
+                                                    final_marking=self.case.i_net_final_marking)
+                    sampled_role = sampled_role.label
+                    print(f"sampled role: {sampled_role}")
+
+                if not_end_of_i_net == False:
+                    print("case finished")
+                    potential_agents = None
+                    case_ended = True
+                    return potential_agents, case_ended
+                
+                # set the current case's agent net accordingly
+                self.case.current_role_net = self.case.role_nets[sampled_role]
+                self.case.current_role_net_marking = self.case.role_nets_markings[sampled_role]
+                self.case.current_role_net_final_marking = self.case.role_net_final_markings[sampled_role]
+                if self.case.role_nets_smap != None:
+                    self.case.current_role_net_smap = self.case.role_nets_smap[sampled_role]
+                else:
+                    self.case.current_role_net_smap = None
+
+
+            # step 2: sample next activity from agent-net
+            sampled_activity_label=None
+            is_final_act = False
+            while sampled_activity_label not in self.activities and is_final_act == False:
+                print(f"is final activity: {is_final_act}")
+                self.case.sampled_transition, is_final_act = sample_next_activity(net=self.case.current_role_net, 
+                                        marking=self.case.current_role_net_marking, 
+                                        final_marking=self.case.current_role_net_final_marking, 
+                                        probabilities=self.case.current_role_net_smap
+                                        )
+                sampled_activity_label = self.case.sampled_transition.label
+                print(f"sampled activity: {sampled_activity_label}")
+                print(f"is final activity: {is_final_act}")
+                # update marking if silent transition
+                if sampled_activity_label == None and is_final_act == False:
+                    self.case.current_role_net_marking, _ = update_marking_after_transition(trans=self.case.sampled_transition, 
+                                                        net=self.case.current_role_net, 
+                                                        marking=self.case.current_role_net_marking)
+                elif sampled_activity_label == None and is_final_act == True:
+                    self.case.currently_active_role_net = False
+                    potential_agents = None
+                    case_ended = False
+                    return potential_agents, case_ended
+                # elif sampled_activity_label in self.activities and is_final_act == True:
+            next_activity = sampled_activity_label
+
         self.new_activity_index = self.activities.index(next_activity)
-
         
-        # if self.model.discover_parallel_work:
-        #     # check if next activity is allowed by looking at prerequisites
-        #     activity_allowed = False
-        #     for key, value in self.model.prerequisites.items():
-        #         if next_activity == key:
-        #             for i in range(len(value)):
-        #                 # if values is a single list, then only ONE of the entries must have been performed already (XOR gateway)
-        #                 if not isinstance(value[i], list):
-        #                     if value[i] in self.case.activities_performed:
-        #                         activity_allowed = True
-        #                         break
-        #                 # if value contains sublists, then all of the values in the sublist must have been performed (AND gateway)
-        #                 else:
-        #                     if all(value_ in self.case.activities_performed for value_ in value[i]):
-        #                         activity_allowed = True
-        #                         break
-        #     # if activity is not specified as prerequisite, additionally check if it is a parallel one to the last activity and thus actually can be performed
-        #     if activity_allowed == False:
-        #         for i in range(len(self.model.parallel_activities)):
-        #             if next_activity in self.model.parallel_activities[i]:
-        #                 if self.case.activities_performed[-1] in self.model.parallel_activities[i]:
-        #                     activity_allowed = True
-        # else:
-        #     activity_allowed = True
-
-        # # additionally check if new activity was already performed
-        # number_occurence_of_next_activity = self.case.activities_performed.count(next_activity)
-        # number_occurence_of_next_activity += 1 # add 1 as it would appear one more time in the next step
-        # if number_occurence_of_next_activity > self.model.max_activity_count_per_case[next_activity]:
-        #     activity_allowed = False
-        #     # check if there is another possible activity that can be performed
-        #     # go through prerequisites and check for which act the current next_activity is a prerequisite for
-        #     # if it is one, then check if this other activity can be performed
-        #     possible_other_next_activities = self.check_for_other_possible_next_activity(next_activity)
-        #     if len(possible_other_next_activities) > 0:
-        #         next_activity = random.choice(possible_other_next_activities)
-        #         self.new_activity_index = self.activities.index(next_activity)
-        #         # print(f"Changed next activity to {next_activity}")
-        #         activity_allowed = True
-        #         # check if next activity is zzz_end
-        #         if next_activity == 'zzz_end':
-        #             potential_agents = None
-        #             case_ended = True
-        #             return potential_agents, case_ended
-        #     # to avoid that simulation does not terminate
-        #     else:
-        #         activity_allowed = True
-
-        # if activity_allowed == False:
-        #     # print(f"case_id: {self.case.case_id}: Next activity {next_activity} not allowed from current activity {current_act} with history {self.case.activities_performed}")
-        #     # TODO: do something when activity is not allowed
-        #     potential_agents = None
-        #     return potential_agents, case_ended#, [], []
-        # else:
-        #     pass
-        #     # print(f"case_id: {self.case.case_id}: Next activity {next_activity} IS ALLOWED from current activity {current_act} with history {self.case.activities_performed}")
-        
+        # step 3: determine corresponding agents of that role being able to perform the activity
         # check which agents can potentially perform the next task
         potential_agents = [key for key, value in self.agent_activity_mapping.items() if any(next_activity == item for item in value)]
+
+        if self.next_agent_distribution != None:
+            # remove agents from next agent distribution that are not in potential agents
+            potential_agents = [agent for agent in self.next_agent_distribution if agent in potential_agents]
         # also add contractor agent to list as he is always active
         potential_agents.insert(0, 9999)
-
 
         return potential_agents, case_ended
     
@@ -1587,19 +1513,41 @@ class Case:
     """
     represents a case, for example a patient in the medical surveillance process
     """
-    def __init__(self, case_id, start_timestamp=None, pn_path="") -> None:
+    def __init__(self, case_id, start_timestamp=None, agentminer_nets=None) -> None:
         self.case_id = case_id
         self.is_done = False
         self.activities_performed = []
+        self.agents_performed = []
         self.case_start_timestamp = start_timestamp
         self.current_timestamp = start_timestamp
         self.additional_next_activities = []
         self.potential_additional_agents = []
         self.timestamp_before_and_gateway = start_timestamp
         self.previous_agent = -1
+        self.previous_role = "-1"
 
-        self.petri_net, self.marking, self.final_marking = pm4py.read_pnml(pn_path)
-        self.sampled_transition = None
+        self.i_net = agentminer_nets[0][0]
+        self.i_net_marking = agentminer_nets[0][1]
+        self.i_net_final_marking = agentminer_nets[0][2]
+        if agentminer_nets[0][3] == None:
+            self.i_net_smap = None
+        else:
+            self.i_net_smap = agentminer_nets[0][3]
+        self.role_nets = agentminer_nets[1][0]
+        self.role_nets_markings = agentminer_nets[1][1]
+        self.role_net_final_markings = agentminer_nets[1][2]
+        if agentminer_nets[1][3] == None:
+            self.role_nets_smap = None
+        else:
+            self.role_nets_smap = agentminer_nets[1][3]
+
+        self.current_role_net = None
+        self.current_role_net_marking = None
+        self.current_role_net_final_marking = None
+
+        self.currently_active_role_net = False
+        self.reached_final_in_role_net = False
+        
 
     def get_last_activity(self):
         """
@@ -1612,6 +1560,9 @@ class Case:
         
     def add_activity_to_case(self, activity):
         self.activities_performed.append(activity)
+
+    def add_agent_to_case(self, agent):
+        self.agents_performed.append(agent)
     
     def update_current_timestep(self, duration):
         self.current_timestamp += pd.Timedelta(seconds=duration)
@@ -1622,14 +1573,17 @@ class BusinessProcessModel(Model):
                  start_timestamp, agent_activity_mapping, transition_probabilities, prerequisites, 
                  parallel_activities, max_activity_count_per_case, parallels_probs_dict, timer, 
                  discover_parallel_work, multitasking_probs_per_resource, max_multitasking_activities, 
-                 activities_without_waiting_time, agent_transition_probabilities, central_orchestration, pn_path, smap):
+                 activities_without_waiting_time, agent_transition_probabilities, central_orchestration, 
+                 agentminer_nets, lstm_model):
         self.data = data
         self.resources = sorted(set(self.data['agent']))
         activities = sorted(set(self.data['activity_name']))
         self.roles = roles
         self.agents_busy_until = {key: start_timestamp for key in self.resources}
         self.calendars = calendars
-        self.pn_path = pn_path
+
+        self.agentminer_nets = agentminer_nets
+        self.lstm_model = lstm_model
 
         self.activity_durations_dict = activity_durations_dict
         self.sampled_case_starting_times = sampled_case_starting_times
@@ -1654,7 +1608,7 @@ class BusinessProcessModel(Model):
 
         self.schedule = MyScheduler(self,)
 
-        self.contractor_agent = ContractorAgent(unique_id=9999, model=self, activities=activities, transition_probabilities=transition_probabilities, agent_activity_mapping=agent_activity_mapping, smap=smap)
+        self.contractor_agent = ContractorAgent(unique_id=9999, model=self, activities=activities, transition_probabilities=transition_probabilities, agent_activity_mapping=agent_activity_mapping)
         self.schedule.add(self.contractor_agent)
 
         for agent_id in range(len(self.resources)):
@@ -1674,7 +1628,7 @@ class BusinessProcessModel(Model):
                 if last_case.current_timestamp >= self.sampled_case_starting_times[0]:
                     self.maximum_case_id += 1
                     new_case_id = self.maximum_case_id
-                    new_case = Case(case_id=new_case_id, start_timestamp=self.sampled_case_starting_times[0], pn_path=self.pn_path)
+                    new_case = Case(case_id=new_case_id, start_timestamp=self.sampled_case_starting_times[0], agentminer_nets=self.agentminer_nets)
                     cases.append(new_case)
                     # remove added case from sampled_case_starting_times list
                     self.sampled_case_starting_times = self.sampled_case_starting_times[1:]
@@ -1682,7 +1636,7 @@ class BusinessProcessModel(Model):
             else:
                 self.maximum_case_id += 1
                 new_case_id = self.maximum_case_id
-                new_case = Case(case_id=new_case_id, start_timestamp=self.sampled_case_starting_times[0], pn_path=self.pn_path)
+                new_case = Case(case_id=new_case_id, start_timestamp=self.sampled_case_starting_times[0], agentminer_nets=self.agentminer_nets)
                 cases.append(new_case)
                 # remove added case from sampled_case_starting_times list
                 self.sampled_case_starting_times = self.sampled_case_starting_times[1:]
@@ -1746,14 +1700,16 @@ def catch_parameter(opt):
     """Change the captured parameters names"""
     switch = {'--log_path': 'log_path', '--train_path': 'train_path', '--test_path': 'test_path', '--case_id': 'case_id', '--activity_name': 'activity_name', 
               '--resource_name': 'resource_name', '--end_timestamp': 'end_timestamp', '--start_timestamp': 'start_timestamp', '--extr_delays': 'extr_delays', 
-              '--parallel_work': 'parallel_work', '--multi_task': 'multi_task', '--central_orchestration': 'central_orchestration'}
+              '--parallel_work': 'parallel_work', '--multi_task': 'multi_task', '--central_orchestration': 'central_orchestration', '--i_net_transitions': 'i_net_transitions', 
+              '--agent_net_transitions': 'agent_net_transitions', '--lstm': 'lstm'}
     return switch.get(opt) 
 
 if __name__ == "__main__":
     warnings.filterwarnings("ignore")
     opts, args = getopt.getopt(sys.argv[1:], "", ["log_path=", "train_path=", "test_path=", "case_id=", "activity_name=", 
                                                   "resource_name=", "end_timestamp=", "start_timestamp=", "extr_delays=", 
-                                                  "parallel_work=", "multi_task=", "central_orchestration="])
+                                                  "parallel_work=", "multi_task=", "central_orchestration=", "i_net_transitions=", 
+                                                  "agent_net_transitions=", "lstm="])
     train_and_test = True
     column_names = {}
     discover_extr_delays = False
@@ -1762,6 +1718,9 @@ if __name__ == "__main__":
     discover_multitask = False
     central_orchestration = False
     determine_automatically = True
+    i_net_transitions = 'equal'
+    agent_net_transitions = 'equal'
+    use_lstm = False
     for opt, arg in opts:
         key = catch_parameter(opt)
         if key in ["log_path"]:
@@ -1791,6 +1750,15 @@ if __name__ == "__main__":
             if arg == "True":
                 central_orchestration = True
             determine_automatically = False
+        if key in ["i_net_transitions"]:
+            i_net_transitions = arg
+        if key in ["agent_net_transitions"]:
+            agent_net_transitions = arg
+        if key in ["lstm"]:
+            if arg == "global":
+                use_lstm = 'global'
+            elif arg == "local":
+                use_lstm = 'local'
             
 
     file_name = os.path.splitext(os.path.basename(PATH_LOG))[0]
@@ -1799,9 +1767,21 @@ if __name__ == "__main__":
         file_name_extension = 'main_results'
     else:
         if central_orchestration:
-            file_name_extension = 'orchestrated_IM' #'orchestrated_IM_custom'
+            if use_lstm != False:
+                if use_lstm == 'global':
+                    file_name_extension = f"orchestrated_lstm"
+                elif use_lstm == 'local':
+                    file_name_extension = f"orchestrated_lstm_local2"
+            else:
+                file_name_extension = f"orchestrated_{i_net_transitions}_{agent_net_transitions}"
         else:
-            file_name_extension = 'autonomous_IM' #'autonomous_IM_custom'
+            if use_lstm != False:
+                if use_lstm == 'global':
+                    file_name_extension = f"autonomous_lstm"
+                elif use_lstm == 'local':
+                    file_name_extension = f"autonomous_lstm_local2"
+            else:
+                file_name_extension = f"autonomous_{i_net_transitions}_{agent_net_transitions}"
     if train_and_test:
         business_process_data, df_test, num_cases_to_simulate = split_data(PATH_LOG, column_names, PATH_LOG_test)
     else:
@@ -1838,7 +1818,9 @@ if __name__ == "__main__":
         os.makedirs(data_dir)
     # save train data
     path_to_train_file = os.path.join(data_dir,"train_preprocessed.csv")
+    path_to_train_file_end = os.path.join(data_dir,"train_preprocessed_end.csv")
     business_process_data_without_end_activity = business_process_data.copy()
+    business_process_data.to_csv(path_to_train_file_end, index=False)
     business_process_data_without_end_activity = business_process_data_without_end_activity[business_process_data_without_end_activity['activity_name'] != 'zzz_end']
     business_process_data_without_end_activity.to_csv(path_to_train_file, index=False)
 
@@ -1850,8 +1832,9 @@ if __name__ == "__main__":
 
 
     # discover petri net
-    net, initial_marking, final_marking, smap, pn_path = discover_petri_net_inductive(log_df=business_process_data_without_end_activity, data_dir=data_dir)
-
+    # net, initial_marking, final_marking, smap = discover_petri_net_inductive(log_df=business_process_data_without_end_activity)
+    # pn_path = os.path.join(data_dir,"petri_net.pnml")
+    # write_petri_net(net, initial_marking, final_marking, pn_path)
 
     # get activities with 0 waiting time
     activities_without_waiting_time = activities_with_zero_waiting_time(business_process_data)
@@ -1864,6 +1847,7 @@ if __name__ == "__main__":
 
     # extract roles and calendars  
     roles = discover_roles_and_calendars(business_process_data_without_end_activity)
+    print(f"roles: {roles}")
 
     res_calendars, task_resources, joint_resource_events, pools_json, coverage_map = discover_calendar_per_agent(business_process_data_without_end_activity)
 
@@ -1871,6 +1855,80 @@ if __name__ == "__main__":
     # activity_durations_dict = compute_activity_duration_per_role(activity_durations_dict, roles)
     activity_durations_dict = compute_activity_duration_distribution_per_agent(activity_durations_dict)
 
+
+    if use_lstm != False:
+        X_activities, X_resources, y_activity, y_resource, activity_encoder, resource_encoder = prepare_data_lstm(business_process_data)
+        activity_vocab_size = len(activity_encoder.classes_)  # Number of unique activities
+        resource_vocab_size = len(resource_encoder.classes_)   # Number of unique resources
+        # Train the LSTM model
+        if use_lstm == 'global':
+            agent_centric = False
+            resource_encoder = None
+        else:
+            agent_centric = True
+        model = train_lstm_model(X_activities, X_resources, y_activity, y_resource, activity_vocab_size, resource_vocab_size, agent_centric)
+
+        lstm_model = (model, activity_encoder, resource_encoder)
+
+        agentminer_nets = ((None, None, None, None), (None, None, None, None))
+    else:
+        lstm_model = None
+
+        # discover agentminer nets
+        path_to_agentminer_nets = run_agent_miner(data_dir=data_dir,
+                        file_name='train_preprocessed.csv',
+                        roles=roles)
+        pn_path = path_to_agentminer_nets
+        # read interaction net
+        i_net, i_net_marking, i_net_final_marking = pm4py.read_pnml(os.path.join(pn_path, 'i-net-aol.pnml'))
+        # read agent nets
+        # parent_parent_dir = os.path.basename(os.path.dirname(os.path.dirname(pn_path)))
+        # Extract and return the last character of the parent-parent directory
+        # number_roles = int(parent_parent_dir[-1])
+        number_roles = len(roles.keys())
+        role_nets = {}
+        role_nets_markings = {}
+        role_net_final_markings = {}
+        for i in range(1, number_roles+1):
+            role = 'a' + str(i)
+            role_nets[role], role_nets_markings[role], role_net_final_markings[role] = pm4py.read_pnml(os.path.join(pn_path, 'agents', "('a"+str(i)+"',)_agent-net-aol.pnml"))
+        
+
+        if i_net_transitions == 'smap':
+            interaction_log = pd.read_csv(os.path.join(pn_path, '_log_in.csv'))
+            i_net_smap = get_stochastic_map(
+                log=interaction_log, 
+                net=i_net, 
+                initial_marking=i_net_marking, 
+                final_marking=i_net_final_marking)
+        elif i_net_transitions == 'custom':
+            interaction_log = pd.read_csv(os.path.join(pn_path, '_log_in.csv'))
+            # i_net_smap = get_interaction_net_probabilities(interaction_log)
+            i_net_path = os.path.join(pn_path, 'i-net-aol.pnml')
+            i_net_smap = get_custom_stochastic_map(interaction_log, i_net, i_net_marking, i_net_final_marking, i_net_path)
+        else:
+            i_net_smap = None
+
+        if agent_net_transitions == 'smap':
+            role_nets_smap = {}
+            for i in range(1, number_roles+1):
+                role = 'a' + str(i)
+                agent_log = pd.read_csv(os.path.join(pn_path, 'agents', "('a"+str(i)+"',)_log.csv"))
+                role_nets_smap[role] = get_stochastic_map(
+                    log=agent_log, 
+                    net=role_nets[role], 
+                    initial_marking=role_nets_markings[role], 
+                    final_marking=role_net_final_markings[role])
+        elif agent_net_transitions == 'custom':
+            role_nets_smap = {}
+            for i in range(1, number_roles+1):
+                role = 'a' + str(i)
+                agent_log = pd.read_csv(os.path.join(pn_path, 'agents', "('a"+str(i)+"',)_log.csv"))
+                role_nets_smap[role] = get_custom_stochastic_map(agent_log, role_nets[role], role_nets_markings[role], role_net_final_markings[role], os.path.join(pn_path, 'agents', "('a"+str(i)+"',)_agent-net-aol.pnml"))
+        else:
+            role_nets_smap = None
+
+        agentminer_nets = ((i_net, i_net_marking, i_net_final_marking, i_net_smap), (role_nets, role_nets_markings, role_net_final_markings, role_nets_smap))
 
     # Case Arrival Distribution
     inter_arrival_durations = get_inter_arrival_times(business_process_data)
@@ -1955,7 +2013,7 @@ if __name__ == "__main__":
     agent_activity_mapping = business_process_data.groupby('agent')['activity_name'].unique().apply(list).to_dict()
 
     transition_probabilities_autonomous = compute_activity_transition_dict(business_process_data)
-    agent_transition_probabilities_autonomous = calculate_agent_transition_probabilities(business_process_data)
+    agent_transition_probabilities_autonomous = calculate_agent_handover_probabilities_per_activity(business_process_data)
     agent_transition_probabilities = None
     transition_probabilities = compute_activity_transition_dict_global(business_process_data)
 
@@ -2033,11 +2091,11 @@ if __name__ == "__main__":
                                                         agent_activity_mapping, transition_probabilities, prerequisites, parallel_activities,
                                                         max_activity_count_per_case, parallels_probs_dict, timers, discover_parallel_work, 
                                                         multitasking_probs_per_resource, max_multitasking_activities, activities_without_waiting_time,
-                                                        agent_transition_probabilities, central_orchestration, pn_path, smap)
+                                                        agent_transition_probabilities, central_orchestration, agentminer_nets, lstm_model)
 
         # define list of cases
         case_id = 0
-        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, pn_path=pn_path) # first case
+        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, agentminer_nets=agentminer_nets) # first case
         cases = [case_]
 
         # Run the model for a specified number of steps
@@ -2060,11 +2118,11 @@ if __name__ == "__main__":
                                                         agent_activity_mapping, transition_probabilities, prerequisites, parallel_activities,
                                                         max_activity_count_per_case, parallels_probs_dict, timers, discover_parallel_work, 
                                                         multitasking_probs_per_resource, max_multitasking_activities, activities_without_waiting_time,
-                                                        agent_transition_probabilities, central_orchestration, pn_path, smap)
+                                                        agent_transition_probabilities, central_orchestration, agentminer_nets, lstm_model)
 
         # define list of cases
         case_id = 0
-        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, pn_path=pn_path) # first case
+        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, agentminer_nets=agentminer_nets) # first case
         cases = [case_]
 
         # Run the model for a specified number of steps
@@ -2089,11 +2147,11 @@ if __name__ == "__main__":
                                                         agent_activity_mapping, transition_probabilities_autonomous, prerequisites, parallel_activities,
                                                         max_activity_count_per_case, parallels_probs_dict, timers, discover_parallel_work, 
                                                         multitasking_probs_per_resource, max_multitasking_activities, activities_without_waiting_time,
-                                                        agent_transition_probabilities_autonomous, central_orchestration, pn_path, smap)
+                                                        agent_transition_probabilities_autonomous, central_orchestration, agentminer_nets, lstm_model)
 
         # define list of cases
         case_id = 0
-        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, pn_path=pn_path) # first case
+        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, agentminer_nets=agentminer_nets) # first case
         cases = [case_]
 
         # Run the model for a specified number of steps
@@ -2116,11 +2174,11 @@ if __name__ == "__main__":
                                                         agent_activity_mapping, transition_probabilities_autonomous, prerequisites, parallel_activities,
                                                         max_activity_count_per_case, parallels_probs_dict, timers, discover_parallel_work, 
                                                         multitasking_probs_per_resource, max_multitasking_activities, activities_without_waiting_time,
-                                                        agent_transition_probabilities_autonomous, central_orchestration, pn_path, smap)
+                                                        agent_transition_probabilities_autonomous, central_orchestration, agentminer_nets, lstm_model)
 
         # define list of cases
         case_id = 0
-        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, pn_path=pn_path) # first case
+        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, agentminer_nets=agentminer_nets) # first case
         cases = [case_]
 
         # Run the model for a specified number of steps
@@ -2222,11 +2280,11 @@ if __name__ == "__main__":
                                                       agent_activity_mapping, transition_probabilities, prerequisites, parallel_activities,
                                                       max_activity_count_per_case, parallels_probs_dict, timers, discover_parallel_work, 
                                                       multitasking_probs_per_resource, max_multitasking_activities, activities_without_waiting_time,
-                                                      agent_transition_probabilities, central_orchestration, pn_path, smap)
+                                                      agent_transition_probabilities, central_orchestration, agentminer_nets, lstm_model)
 
         # define list of cases
         case_id = 0
-        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, pn_path=pn_path) # first case
+        case_ = Case(case_id=case_id, start_timestamp=start_timestamp, agentminer_nets=agentminer_nets) # first case
         cases = [case_]
 
         # Run the model for a specified number of steps
