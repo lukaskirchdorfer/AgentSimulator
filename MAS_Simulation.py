@@ -340,16 +340,167 @@ def compute_activity_duration_distribution(df):
     return act_durations
 
 
-def compute_activity_duration_distribution_per_agent(activity_durations_dict):
+# def compute_activity_duration_distribution_per_agent(activity_durations_dict):
+#     """
+#     Compute the best fitting distribution of activity durations per agent.
+
+#     Args:
+#         activity_durations_dict (dict): A dict storing lists of activity durations per agent from the training log.
+
+#     Returns:
+#         dict: A dict storing for each agent the distribution for each activity.
+#     """
+#     agents = activity_durations_dict.keys()
+#     activities = []
+#     for k,v in activity_durations_dict.items():
+#         for kk, vv in v.items():
+#             activities.append(kk)
+#     activities = set(activities)
+
+#     act_duration_distribution_per_agent = {agent: {act: [] for act in activities} for agent in agents}
+
+#     for agent, val in activity_durations_dict.items():
+#         for act, duration_list in val.items():
+#             if len(duration_list) > 0:
+#                 duration_distribution = get_best_fitting_distribution(
+#                     data=duration_list,
+#                     filter_outliers=True,
+#                     outlier_threshold=20.0,
+#                 )
+#                 act_duration_distribution_per_agent[agent][act] = duration_distribution
+
+#     return act_duration_distribution_per_agent
+
+def _compute_activity_duration_distribution(df, res_calendars, roles):
+    """
+    computes mean and std for each activity duration in the log and returns this in form of a dict
+    """
+    # activities = sorted(set(df['activity_name']))
+    # agents = sorted(set(df['agent']))
+    # act_durations = {key: {k: [] for k in activities} for key in agents}
+    # for agent in agents:
+    #     for activity in activities:
+    #         for i in range(len(df)):
+    #             if df['agent'][i] == agent:
+    #                 if df['activity_name'][i] == activity:
+    #                     duration = (df['end_timestamp'][i] - df['start_timestamp'][i]).total_seconds()
+    #                     act_durations[agent][activity].append(duration)
+
+    # return act_durations
+
+    activities = sorted(set(df['activity_name']))
+    agents = sorted(set(df['agent']))
+    act_durations = {key: {k: [] for k in activities} for key in agents}
+
+    
+    for agent in agents:
+        if agent in res_calendars.keys():
+            agent_calendar = res_calendars[agent].intervals_to_json()
+        else:
+            agent_calendar = next((ids['calendar'] for role, ids in roles.items() if agent in ids['agents']), None)
+        # print(f"agent: {agent}")
+        # print(f"agent_calendar: {agent_calendar}")
+        # if agent_calendar is None:
+        #     continue
+
+        # Convert calendar to workday schedule
+        work_schedule = {}
+        for shift in agent_calendar:
+            day = shift['from']  # e.g., 'MONDAY'
+            start_time = pd.to_datetime(shift['beginTime']).time()  # e.g., '07:00:00'
+            end_time = pd.to_datetime(shift['endTime']).time()  # e.g., '15:00:00'
+            work_schedule[day] = (start_time, end_time)
+        
+        for activity in activities:
+            # print(f"activity: {activity}")
+            mask = (df['agent'] == agent) & (df['activity_name'] == activity)
+            activity_events = df[mask]
+            
+            for _, event in activity_events.iterrows():
+                start_time = event['start_timestamp']
+                end_time = event['end_timestamp']
+                # print(f"start_time: {start_time}, end_time: {end_time}")
+                
+                # Initialize counters
+                total_duration = (end_time - start_time).total_seconds()
+                off_time = 0
+                current_time = start_time
+                
+                # Iterate through each day of the activity
+                while current_time < end_time:
+                    day_name = current_time.strftime('%A').upper()
+                    # print(f"day_name: {day_name}")
+                    day_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                    day_end = day_start + pd.Timedelta(days=1)
+                    
+                    # Get work hours for this day
+                    work_hours = work_schedule.get(day_name)
+                    # print(f"work_hours: {work_hours}")
+                    if work_hours:
+                        work_start = day_start.replace(
+                            hour=work_hours[0].hour,
+                            minute=work_hours[0].minute,
+                            second=work_hours[0].second
+                        )
+                        work_end = day_start.replace(
+                            hour=work_hours[1].hour,
+                            minute=work_hours[1].minute,
+                            second=work_hours[1].second
+                        )
+                        
+                        # Calculate off time for this day
+                        day_activity_start = max(current_time, day_start)
+                        day_activity_end = min(end_time, day_end)
+                        
+                        # Before work hours
+                        if day_activity_start < work_start:
+                            off_end = min(work_start, day_activity_end)
+                            off_time += (off_end - day_activity_start).total_seconds()
+                            # print(f"off time before work hours: {(off_end - day_activity_start).total_seconds()}")
+                        
+                        # After work hours
+                        if day_activity_end > work_end:
+                            off_start = max(work_end, day_activity_start)
+                            off_time += (day_activity_end - off_start).total_seconds()
+                            # print(f"off time after work hours: {(day_activity_end - off_start).total_seconds()}")
+                    else:
+                        # Full day off
+                        day_activity_start = max(current_time, day_start)
+                        day_activity_end = min(end_time, day_end)
+                        off_time += (day_activity_end - day_activity_start).total_seconds()
+                        # print(f"off time full day off: {(day_activity_end - day_activity_start).total_seconds()}")
+                    # Move to next day
+                    current_time = day_end
+
+                # print(f"total_duration: {total_duration}, off_time: {off_time}")
+                # Calculate actual working duration
+                actual_duration = total_duration - off_time
+                if actual_duration >= 0:  # Only add positive durations
+                    act_durations[agent][activity].append(actual_duration)
+
+    # # print the mean and std of the activity durations
+    # for agent, activities in act_durations.items():
+    #     for activity, durations in activities.items():
+    #         if len(durations) > 0:
+    #             print(f"agent: {agent}, activity: {activity}, mean: {np.mean(durations)}, std: {np.std(durations)}")
+    
+    # x=y
+
+    return act_durations
+
+
+def compute_activity_duration_distribution_per_agent(df_train, res_calendars, roles):
     """
     Compute the best fitting distribution of activity durations per agent.
 
     Args:
-        activity_durations_dict (dict): A dict storing lists of activity durations per agent from the training log.
+        df_train: Event log in pandas format
 
     Returns:
         dict: A dict storing for each agent the distribution for each activity.
     """
+    activity_durations_dict = _compute_activity_duration_distribution(df_train, res_calendars, roles)
+
     agents = activity_durations_dict.keys()
     activities = []
     for k,v in activity_durations_dict.items():
@@ -1066,6 +1217,27 @@ class ResourceAgent(Agent):
                                     'end_timestamp': self.contractor_agent.case.current_timestamp,
                                     'TimeStep': self.model.schedule.steps,
                                     })
+                
+            elif self.start_time_in_calendar(current_timestamp):
+                # print(f"simulate interruption")
+                # end_time_without_interruptions = current_timestamp + pd.Timedelta(seconds=activity_duration)
+                end_time = self.add_off_time_to_end_time(current_timestamp, activity_duration)
+                self.occupied_times.append((current_timestamp, end_time))
+                self.is_busy_until = end_time
+                self.is_busy = True
+                self.model.agents_busy_until[self.resource] = self.is_busy_until
+                self.contractor_agent.case.current_timestamp = end_time
+                self.contractor_agent.case.add_activity_to_case(activity)
+                self.contractor_agent.activity_performed = True
+                self.contractor_agent.case.previous_agent = self.resource
+                STEPS_TAKEN.append({'case_id': self.contractor_agent.case.case_id, 
+                                    'agent': self.resource, 
+                                    'activity_name': activity,
+                                    'start_timestamp': current_timestamp,
+                                    'end_timestamp': self.contractor_agent.case.current_timestamp,
+                                    'TimeStep': self.model.schedule.steps,
+                                    })
+                
             else:
                 print(f"#######agent {self.resource} is free but time not within calendar")
                 if last_possible_agent: # then increase timer by x seconds to try to get an available agent later
@@ -1233,6 +1405,100 @@ class ResourceAgent(Agent):
             next_possible_timestamp = pd.Timestamp(next_possible_timestamp, tzinfo=pytz.UTC) #tz='UTC')
 
         return next_possible_timestamp
+    
+    def start_time_in_calendar(self, current_timestamp):
+        day_of_week = current_timestamp.strftime('%A').upper()
+        for entry in self.calendar:
+            if entry['from'] == day_of_week:
+                try:
+                    begin_time = datetime.strptime(entry['beginTime'], '%H:%M:%S')
+                except ValueError:
+                    # If the first format fails, try the second format '%H:%M:%S.%f'
+                    begin_time = datetime.strptime(entry['beginTime'], '%H:%M:%S.%f')
+                begin_time_current_activity = datetime.combine(current_timestamp.date(), current_timestamp.time())
+                begin_time_current_activity = begin_time_current_activity.time()
+                if begin_time.time() <= begin_time_current_activity:
+                    return True
+        return False
+    
+    def add_off_time_to_end_time(self, start_time, activity_duration):
+        """
+        Calculates the actual end time by adding unavailable periods to the activity duration.
+        
+        Args:
+            start_time (pd.Timestamp): The start time of the activity
+            activity_duration (float): The duration of the activity in seconds
+        
+        Returns:
+            pd.Timestamp: The end time including off-time periods
+        """
+        remaining_duration = activity_duration
+        current_time = start_time
+        
+        while remaining_duration > 0:
+            # Get the current day and time
+            current_day = current_time.strftime('%A').upper()
+            current_time_of_day = current_time.time()
+            
+            # Find working hours for the current day
+            working_hours = None
+            for entry in self.calendar:
+                if entry['from'] == current_day:
+                    try:
+                        begin_time = datetime.strptime(entry['beginTime'], '%H:%M:%S').time()
+                    except ValueError:
+                        begin_time = datetime.strptime(entry['beginTime'], '%H:%M:%S.%f').time()
+                    try:
+                        end_time = datetime.strptime(entry['endTime'], '%H:%M:%S').time()
+                    except ValueError:
+                        end_time = datetime.strptime(entry['endTime'], '%H:%M:%S.%f').time()
+                    working_hours = (begin_time, end_time)
+                    break
+            
+            if working_hours is None:
+                # No working hours today, move to next day at start time
+                current_time = current_time + pd.Timedelta(days=1)
+                current_time = current_time.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                continue
+            
+            begin_time, end_time = working_hours
+            
+            if current_time_of_day < begin_time:
+                # Before working hours, jump to beginning of working hours
+                current_time = current_time.replace(
+                    hour=begin_time.hour,
+                    minute=begin_time.minute,
+                    second=begin_time.second,
+                    microsecond=begin_time.microsecond
+                )
+            elif current_time_of_day >= end_time:
+                # After working hours, jump to next day
+                current_time = current_time + pd.Timedelta(days=1)
+                current_time = current_time.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+            else:
+                # During working hours, process duration until end of working hours
+                time_until_end_of_day = (
+                    datetime.combine(current_time.date(), end_time) - 
+                    datetime.combine(current_time.date(), current_time_of_day)
+                ).total_seconds()
+                
+                duration_to_process = min(remaining_duration, time_until_end_of_day)
+                current_time += pd.Timedelta(seconds=duration_to_process)
+                remaining_duration -= duration_to_process
+                
+                if remaining_duration > 0 and current_time.time() >= end_time:
+                    # If we hit the end of working hours and still have duration left,
+                    # move to the next day
+                    current_time = current_time + pd.Timedelta(days=1)
+                    current_time = current_time.replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+        
+        return current_time
 
         
 
@@ -1270,13 +1536,61 @@ class ContractorAgent(Agent):
         # # 2) sort by next availability
         sorted_agent_keys = self.sort_agents_by_availability(sorted_agent_keys)
             
+        # if self.model.central_orchestration == False:
+        #         # 3) sort by transition probs
+        #         current_agent = self.case.previous_agent
+        #         if current_agent != -1:
+        #             current_activity = self.case.activities_performed[-1]
+        #             if current_agent in self.model.agent_transition_probabilities:
+        #                 if current_activity in self.model.agent_transition_probabilities[current_agent]:
+        #                     current_probabilities = self.model.agent_transition_probabilities[current_agent][current_activity]
+        #                 else:
+        #                     current_probabilities = self.model.agent_transition_probabilities[current_agent]
+        #             sorted_agent_keys = sorted(sorted_agent_keys, key=lambda x: current_probabilities.get(x, 0), reverse=True)
+
         if self.model.central_orchestration == False:
             # 3) sort by transition probs
             current_agent = self.case.previous_agent
             if current_agent != -1:
+                current_activity = self.case.activities_performed[-1]
+                next_activity = self.activities[self.new_activity_index]  # Get the next activity
+                
+                # Navigate through the nested dictionary structure
                 if current_agent in self.model.agent_transition_probabilities:
-                    current_probabilities = self.model.agent_transition_probabilities[current_agent]
-                sorted_agent_keys = sorted(sorted_agent_keys, key=lambda x: current_probabilities.get(x, 0), reverse=True)
+                    if current_activity in self.model.agent_transition_probabilities[current_agent]:
+                        # Create a dictionary to store probabilities for each potential next agent
+                        current_probabilities = {}
+                        for agent in sorted_agent_keys:
+                            # Sum up probabilities for the specific next activity across all agents
+                            if agent in self.model.agent_transition_probabilities[current_agent][current_activity]:
+                                prob = self.model.agent_transition_probabilities[current_agent][current_activity][agent].get(next_activity, 0)
+                                current_probabilities[agent] = prob
+                            else:
+                                current_probabilities[agent] = 0
+                        # print(f"current_activity: {current_activity}")
+                        # print(f"current_agent: {current_agent}")
+                        # print(f"current_probabilities: {self.model.agent_transition_probabilities[current_agent][current_activity]}")
+                        # print(f"sorted_agent_keys before: {sorted_agent_keys}")
+                        # Filter out agents with zero probability and sort remaining agents
+                        sorted_agent_keys_ = [
+                            agent for agent in sorted_agent_keys 
+                            if current_probabilities.get(agent, 0) > 0
+                        ]
+                        if len(sorted_agent_keys_) > 0:
+                            # sorted_agent_keys = sorted_agent_keys_
+                            # sorted_agent_keys = sorted(sorted_agent_keys, 
+                            #                      key=lambda x: current_probabilities.get(x, 0), 
+                            #                      reverse=True)
+                            probabilities = [current_probabilities[agent] for agent in sorted_agent_keys_]
+                            sorted_agent_keys = random.choices(
+                                sorted_agent_keys_,
+                                weights=probabilities,
+                                k=len(sorted_agent_keys_)
+                            )
+                        else:
+                            sorted_agent_keys = sorted_agent_keys
+                        # print(f"sorted_agent_keys after: {sorted_agent_keys}")                        
+        # print(f"sorted_agent_keys: {sorted_agent_keys}")
 
         last_possible_agent = False
 
@@ -1357,24 +1671,36 @@ class ContractorAgent(Agent):
 
         return activity_duration
     
-    def sample_starting_activity(self,):
+    def sample_starting_activity(self):
         """
-        sample the activity that starts the case based on the frequency of starting activities in the train log
+        Sample the activity that starts the case based on the frequency of starting activities in the train log
         """
-        start_activities = self.model.data.groupby('case_id')['activity_name'].first().tolist()
-        # Count occurrences of each entry and create a dictionary
-        start_count = {}
-        for entry in start_activities:
-            if entry in start_count:
-                start_count[entry] += 1
+        
+        # Cache the start activities if not already cached
+        if not hasattr(self, '_start_activities_dist'):
+            # Get first activity for each case more efficiently
+            df = self.model.data
+            # Sort once and get first activity for each case
+            first_activities = (df.sort_values(['case_id', 'start_timestamp', 'end_timestamp'])
+                            .groupby('case_id')['activity_name']
+                            .first())
+            
+            # Handle Start/start cases
+            if "Start" in first_activities.values or "start" in first_activities.values:
+                self._start_activities_dist = ("Start" if "Start" in first_activities.values else "start", None)
             else:
-                start_count[entry] = 1
+                # Calculate frequencies
+                total_cases = len(df['case_id'].unique())
+                start_count = first_activities.value_counts() / total_cases
+                self._start_activities_dist = (list(start_count.index), list(start_count.values))
 
-        for key, value in start_count.items():
-            start_count[key] = value / len(self.model.data['case_id'].unique())
-
-        sampled_activity = random.choices(list(start_count.keys()), weights=start_count.values(), k=1)[0]
-
+        # Use cached distribution
+        activities, weights = self._start_activities_dist
+        if isinstance(activities, str):  # Handle Start/start case
+            sampled_activity = activities
+        else:
+            sampled_activity = random.choices(activities, weights=weights, k=1)[0]
+        
         return sampled_activity
     
     def check_for_other_possible_next_activity(self, next_activity):
@@ -1826,9 +2152,15 @@ if __name__ == "__main__":
     df_val, _ = preprocess(df_val)
 
     # compute mean and std of activity durations
-    activity_durations_dict = compute_activity_duration_distribution(business_process_data)
-    _ = compute_activity_duration_distribution(df_test)
-    _ = compute_activity_duration_distribution(df_val)
+    # activity_durations_dict = compute_activity_duration_distribution(business_process_data)
+    # _ = compute_activity_duration_distribution(df_test)
+    # _ = compute_activity_duration_distribution(df_val)
+    business_process_data['end_timestamp']= pd.to_datetime(business_process_data['end_timestamp'], utc=True, format='mixed')
+    business_process_data['start_timestamp']= pd.to_datetime(business_process_data['start_timestamp'], utc=True, format='mixed')
+    df_test['end_timestamp']= pd.to_datetime(df_test['end_timestamp'], utc=True, format='mixed')
+    df_test['start_timestamp']= pd.to_datetime(df_test['start_timestamp'], utc=True, format='mixed')
+    df_val['end_timestamp']= pd.to_datetime(df_val['end_timestamp'], utc=True, format='mixed')
+    df_val['start_timestamp']= pd.to_datetime(df_val['start_timestamp'], utc=True, format='mixed')
 
     data_dir = os.path.join(os.getcwd(), "simulated_data", file_name, file_name_extension)
     print(data_dir)
@@ -1869,7 +2201,8 @@ if __name__ == "__main__":
 
     # compute activity durations per agent
     # activity_durations_dict = compute_activity_duration_per_role(activity_durations_dict, roles)
-    activity_durations_dict = compute_activity_duration_distribution_per_agent(activity_durations_dict)
+    # activity_durations_dict = compute_activity_duration_distribution_per_agent(activity_durations_dict)
+    activity_durations_dict = compute_activity_duration_distribution_per_agent(business_process_data_without_end_activity, res_calendars, roles)
 
 
     # Case Arrival Distribution
