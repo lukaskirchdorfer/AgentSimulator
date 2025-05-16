@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import json
 from source.utils import store_preprocessed_data
 from source.agent_types.discover_roles import discover_roles_and_calendars
 from source.agent_types.discover_resource_calendar import discover_calendar_per_agent
@@ -22,6 +23,7 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
     df_train, agent_to_resource = preprocess(df_train)
     df_test, _ = preprocess(df_test)
     df_val, _ = preprocess(df_val)
+    # START_TIME = min(df_train.groupby('case_id')['start_timestamp'].min().to_list())
     START_TIME = min(df_test.groupby('case_id')['start_timestamp'].min().to_list())
     START_TIME_VAL = min(df_val.groupby('case_id')['start_timestamp'].min().to_list())
 
@@ -33,6 +35,10 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
     # extract roles and calendars  
     roles = discover_roles_and_calendars(df_train_without_end_activity)
     res_calendars, _, _, _, _ = discover_calendar_per_agent(df_train_without_end_activity)
+    for key, value in res_calendars.items():
+        # set each value to a list of dicts in the form {'from': 'MONDAY', 'to': 'MONDAY', 'beginTime': '07:00:00', 'endTime': '15:00:00'}
+        value = [{"from": "Monday", "to": "Sunday", "beginTime": '00:00:00', "endTime": '23:59:59'}]
+        print(f"agent: {key}, calendar: {value}")
 
     activity_durations_dict = compute_activity_duration_distribution_per_agent(df_train, res_calendars, roles)
 
@@ -52,8 +58,19 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
 
 
     # sample arrival times for training and validation data
-    case_arrival_times, train_params = get_case_arrival_times(df_train, start_timestamp=START_TIME, num_cases_to_simulate=num_cases_to_simulate, train=True)
-    case_arrival_times_val, _ = get_case_arrival_times(df_val, start_timestamp=START_TIME_VAL, num_cases_to_simulate=num_cases_to_simulate_val, train=False, train_params=train_params)
+    # case_arrival_times, train_params = get_case_arrival_times(df_train, start_timestamp=START_TIME, num_cases_to_simulate=num_cases_to_simulate, train=True)
+    # case_arrival_times_val, _ = get_case_arrival_times(df_val, start_timestamp=START_TIME_VAL, num_cases_to_simulate=num_cases_to_simulate_val, train=False, train_params=train_params)
+    case_arrival_times_val = None
+    # # read json file and convert to list of timestamps
+    # case_arrival_times_tr = json.load(open('/Users/I589354/Library/CloudStorage/OneDrive-SAPSE/private_asim/AgentSimulator/raw_data/covid/train.json'))
+    # case_arrival_times_te = json.load(open('/Users/I589354/Library/CloudStorage/OneDrive-SAPSE/private_asim/AgentSimulator/raw_data/covid/test.json'))
+    # # merge the two lists
+    # case_arrival_times = case_arrival_times_tr + case_arrival_times_te
+    # case_arrival_times = [pd.to_datetime(timestamp, utc=True) for timestamp in case_arrival_times]
+    # print(f"case_arrival_times: {case_arrival_times}")
+
+    case_arrival_times = json.load(open('/Users/I589354/Library/CloudStorage/OneDrive-SAPSE/private_asim/AgentSimulator/raw_data/covid/test.json'))
+    case_arrival_times = [pd.to_datetime(timestamp, utc=True) for timestamp in case_arrival_times]
 
     simulation_parameters = {
         'activity_durations_dict': activity_durations_dict,

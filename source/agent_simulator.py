@@ -46,7 +46,7 @@ class AgentSimulator:
             file_name_extension = 'main_results'
         else:
             if self.params['central_orchestration']:
-                file_name_extension = 'orchestrated'
+                file_name_extension = 'test'
             else:
                 file_name_extension = 'autonomous'
         if self.params['train_and_test']:

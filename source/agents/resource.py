@@ -17,10 +17,12 @@ class ResourceAgent(Agent):
         self.is_busy_until = None
         self.contractor_agent = contractor_agent
         self.agent_type = next((role for role, ids in self.model.roles.items() if self.resource in ids['agents']), None)
+        # self.calendar = [{"from": day, "to": day, "beginTime": '00:00:00', "endTime": '23:59:59'} for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']]
         if self.resource in self.model.calendars.keys():
             self.calendar = self.model.calendars[self.resource].intervals_to_json()
         else:
             self.calendar = next((ids['calendar'] for role, ids in self.model.roles.items() if self.resource in ids['agents']), None)
+        print(f"calendar: {self.calendar}")
         self.timer = timer
         self.occupied_times = []
 

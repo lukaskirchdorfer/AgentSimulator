@@ -63,26 +63,20 @@ def discover_resource_calendars_per_profile(
 
     if len(missing_profiles) > 0:
         filtered_event_log = event_log[event_log['agent'].isin(missing_agents)]
+        missing_resource_calendar = _create_full_day_calendar()
 
-        # Discover one resource calendar for all of them
-        # print("try to discover calendar with filtered event log")
-        missing_resource_calendar = _discover_undifferentiated_resource_calendar(filtered_event_log, params)
-        if missing_resource_calendar is None or len(missing_resource_calendar) == 0:
-            # print("try to discover calendar with full event log")
-            # Could not discover calendar for the missing resources, discover calendar with the entire log
-            missing_resource_calendar = _discover_undifferentiated_resource_calendar(event_log, params)
-            if missing_resource_calendar is None or len(missing_resource_calendar) == 0:
-                # print("set 24/7 calendar")
-                # Could not discover calendar for all the resources in the log, assign default 24/7
-                missing_resource_calendar = _create_full_day_calendar()
-        # Add grouped calendar to discovered resource calendars
-        # resource_calendars += [missing_resource_calendar]
-        # Set common calendar id to missing resources
-        # _update_resource_calendars(missing_profiles, missing_resource_calendar.calendar_id)
+        # # Discover one resource calendar for all of them
+        # # print("try to discover calendar with filtered event log")
+        # missing_resource_calendar = _discover_undifferentiated_resource_calendar(filtered_event_log, params)
+        # if missing_resource_calendar is None or len(missing_resource_calendar) == 0:
+        #     # print("try to discover calendar with full event log")
+        #     # Could not discover calendar for the missing resources, discover calendar with the entire log
+        #     missing_resource_calendar = _discover_undifferentiated_resource_calendar(event_log, params)
+        #     if missing_resource_calendar is None or len(missing_resource_calendar) == 0:
+        #         # print("set 24/7 calendar")
+        #         # Could not discover calendar for all the resources in the log, assign default 24/7
+        #         missing_resource_calendar = _create_full_day_calendar()
 
-        # print(f"discovered timetables: {missing_resource_calendar}")
-        # for key, value in missing_resource_calendar.items():
-            # print(f"{key}: {value.to_dict()}")
         pool_names = list(pools.keys())
         resource_profile_names = list(missing_resource_calendar.keys())
         # print(f"pool names: {pool_names}")

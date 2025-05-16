@@ -269,6 +269,14 @@ class DurationDistribution:
         )
 
 
+def get_average_distribution(data: list, filter_outliers: bool = False,
+    outlier_threshold: float = 20.0) -> DurationDistribution:
+    # Filter outliers
+    filtered_data = remove_outliers(data, outlier_threshold) if filter_outliers else data
+    mean = np.mean(filtered_data) * 0.5
+
+    distribution = DurationDistribution("fix", mean, 0.0, 0.0, mean, mean)
+    return distribution
 
 def get_best_fitting_distribution(
     data: list,

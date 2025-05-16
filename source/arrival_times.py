@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import scipy.stats as st
 import math
-from source.arrival_distribution import get_best_fitting_distribution, get_inter_arrival_times
+from source.arrival_distribution import get_best_fitting_distribution, get_inter_arrival_times, get_average_distribution
 
 def get_case_arrival_times(df, start_timestamp, num_cases_to_simulate, train=True, train_params=None):
     if train:
@@ -16,7 +16,6 @@ def get_case_arrival_times(df, start_timestamp, num_cases_to_simulate, train=Tru
     sampled_cases = []
 
     first_day = True
-
     while len(sampled_cases) <= num_cases_to_simulate:
         date_string = date_of_current_timestamp.strftime('%Y-%m-%d')
         if day_of_current_timestamp in min_max_time_per_day.keys():
@@ -49,7 +48,12 @@ def get_arrival_parameters_for_train(df):
 
 def _get_arrival_distribution(df_train):
     inter_arrival_durations = get_inter_arrival_times(df_train)
-    arrival_distribution = get_best_fitting_distribution(
+    # arrival_distribution = get_best_fitting_distribution(
+    #     data=inter_arrival_durations,
+    #     filter_outliers=False,
+    #     outlier_threshold=20.0,
+    # )
+    arrival_distribution = get_average_distribution(
         data=inter_arrival_durations,
         filter_outliers=False,
         outlier_threshold=20.0,

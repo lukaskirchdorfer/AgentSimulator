@@ -24,6 +24,12 @@ def store_preprocessed_data(df_train, df_test, df_val, data_dir):
 
 
 def store_simulated_log(data_dir, simulated_log, index):
+    # # remove agent column
+    # simulated_log = simulated_log.drop(columns=['agent', 'TimeStep'])
+    # # rename activity column to activity_name
+    # simulated_log = simulated_log.rename(columns={'activity_name': 'activity'})
+    # # rename start_timestamp to Start_Time and end_timestamp to End_Time
+    # simulated_log = simulated_log.rename(columns={'start_timestamp': 'Start_Time', 'end_timestamp': 'End_Time'})
     path_to_file = os.path.join(data_dir,f"simulated_log_{index}.csv")
     simulated_log.to_csv(path_to_file, index=False)
     print(f"Simulated logs are stored in {path_to_file}")

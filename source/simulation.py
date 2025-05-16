@@ -12,7 +12,7 @@ def simulate_process(df_train, simulation_parameters, data_dir, num_simulations)
     start_timestamp = simulation_parameters['case_arrival_times'][0]
     simulation_parameters['start_timestamp'] = start_timestamp
     simulation_parameters['case_arrival_times'] = simulation_parameters['case_arrival_times'][1:]
-    for i in range(num_simulations):
+    for i in range(1):
         # Create the model using the loaded data
         business_process_model = BusinessProcessModel(df_train, simulation_parameters)
 

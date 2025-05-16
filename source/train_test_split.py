@@ -83,6 +83,7 @@ def split_data(PATH_LOG, column_names, PATH_LOG_test=None):
     # print(f"The val log conisists of {len(set(df_val['case_id']))} cases")
     print(f"The test log conisists of {len(set(df_test['case_id']))} cases")
 
+    # number_test_cases = len(set(df_train_big['case_id'])) + len(set(df_test['case_id']))
     number_test_cases = len(set(df_test['case_id']))
 
     return df_train_big, df_test, number_test_cases
