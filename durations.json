@@ -1,0 +1,78 @@
+{
+    "0": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "1": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "2": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "3": {
+        "multiplier": 1,
+        "cost": 100
+    },
+    "4": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "5": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "6": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "7": {
+        "multiplier": 1,
+        "cost": 100
+    },
+    "8": {
+        "multiplier": 1,
+        "cost": 100
+    },
+    "9": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "10": {
+        "multiplier": 6,
+        "cost": 50
+    },
+    "11": {
+        "multiplier": 3,
+        "cost": 80
+    },
+    "12": {
+        "multiplier": 3,
+        "cost": 80
+    },
+    "13": {
+        "multiplier": 1,
+        "cost": 100
+    },
+    "14": {
+        "multiplier": 1,
+        "cost": 100
+    },
+    "15": {
+        "multiplier": 3,
+        "cost": 80
+    },
+    "16": {
+        "multiplier": 3,
+        "cost": 80
+    },
+    "17": {
+        "multiplier": 1,
+        "cost": 100
+    },
+    "18": {
+        "multiplier": 1,
+        "cost": 100
+    }
+}

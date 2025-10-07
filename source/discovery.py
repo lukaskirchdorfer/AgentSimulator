@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import json
 from source.utils import store_preprocessed_data
 from source.agent_types.discover_roles import discover_roles_and_calendars
 from source.agent_types.discover_resource_calendar import discover_calendar_per_agent
@@ -19,11 +20,16 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
     """
     Discover the simulation model from the training data.
     """
+    # split into train, test, val
     df_train, agent_to_resource = preprocess(df_train)
-    df_test, _ = preprocess(df_test)
-    df_val, _ = preprocess(df_val)
-    START_TIME = min(df_test.groupby('case_id')['start_timestamp'].min().to_list())
-    START_TIME_VAL = min(df_val.groupby('case_id')['start_timestamp'].min().to_list())
+    if df_test is not None:
+        df_test, _ = preprocess(df_test)
+        df_val, _ = preprocess(df_val)
+        START_TIME = min(df_test.groupby('case_id')['start_timestamp'].min().to_list())
+        START_TIME_VAL = min(df_val.groupby('case_id')['start_timestamp'].min().to_list())
+    else:
+        START_TIME = min(df_train.groupby('case_id')['start_timestamp'].min().to_list())
+        START_TIME_VAL = None
 
 
     df_train_without_end_activity = store_preprocessed_data(df_train, df_test, df_val, data_dir)
@@ -31,16 +37,22 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
     activities_without_waiting_time = activities_with_zero_waiting_time(df_train)
 
     # extract roles and calendars  
-    roles = discover_roles_and_calendars(df_train_without_end_activity)
-    res_calendars, _, _, _, _ = discover_calendar_per_agent(df_train_without_end_activity)
+    roles = discover_roles_and_calendars(df_train_without_end_activity) # agents clustered into functional groups
+    res_calendars, _, _, _, _ = discover_calendar_per_agent(df_train_without_end_activity) # working schedules per resource
 
-    activity_durations_dict = compute_activity_duration_distribution_per_agent(df_train, res_calendars, roles)
+    activity_durations_dict = compute_activity_duration_distribution_per_agent(df_train, res_calendars, roles) # Fits statistical distributions (normal, lognorm, gamma, etc.) per (agent, activity) pair. I dont get the dict
+    print(f"activity durations dict: {activity_durations_dict}")
+    with open('durations_same_money_diff_time.json', 'r') as f:
+        duration_distribution_multiplier = json.load(f)
+    activity_durations_dict = modify_duration_distributions(activity_durations_dict, duration_distribution_multiplier)
 
     # define mapping of agents to activities based on event log
-    agent_activity_mapping = df_train.groupby('agent')['activity_name'].unique().apply(list).to_dict()
+    agent_activity_mapping = df_train.groupby('agent')['activity_name'].unique().apply(list).to_dict() # Captures which agents perform which activities.
+    print(f"agent activity mapping: {agent_activity_mapping}")
 
-    transition_probabilities_autonomous = compute_activity_transition_dict(df_train)
-    agent_transition_probabilities_autonomous = calculate_agent_handover_probabilities_per_activity(df_train)
+
+    transition_probabilities_autonomous = compute_activity_transition_dict(df_train) 
+    agent_transition_probabilities_autonomous = calculate_agent_handover_probabilities_per_activity(df_train) # I am here
     agent_transition_probabilities = None
     transition_probabilities = compute_activity_transition_dict_global(df_train)
 
@@ -52,8 +64,13 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
 
 
     # sample arrival times for training and validation data
+    print(f"num cases to simulate: {num_cases_to_simulate}")
     case_arrival_times, train_params = get_case_arrival_times(df_train, start_timestamp=START_TIME, num_cases_to_simulate=num_cases_to_simulate, train=True)
-    case_arrival_times_val, _ = get_case_arrival_times(df_val, start_timestamp=START_TIME_VAL, num_cases_to_simulate=num_cases_to_simulate_val, train=False, train_params=train_params)
+    if df_val is not None:
+        case_arrival_times_val, _ = get_case_arrival_times(df_val, start_timestamp=START_TIME_VAL, num_cases_to_simulate=num_cases_to_simulate_val, train=False, train_params=train_params)
+    else:
+        case_arrival_times_val = None
+
 
     simulation_parameters = {
         'activity_durations_dict': activity_durations_dict,
@@ -75,7 +92,6 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
 
     simulation_parameters = determine_agent_behavior_type_and_extraneous_delays(simulation_parameters, df_train, df_val, case_arrival_times_val, central_orchestration, discover_extr_delays)
     simulation_parameters['start_timestamp'] = START_TIME
-
 
     return df_train, simulation_parameters
 
@@ -277,6 +293,20 @@ def compute_activity_duration_distribution_per_agent(df_train, res_calendars, ro
                     outlier_threshold=20.0,
                 )
                 act_duration_distribution_per_agent[agent][act] = duration_distribution
+
+    return act_duration_distribution_per_agent
+
+def modify_duration_distributions(act_duration_distribution_per_agent, duration_distribution_multiplier: dict):
+    """
+    Modify the duration distributions by multiplying the mean by the duration_distribution_multiplier.
+    """
+    for agent, activities in act_duration_distribution_per_agent.items():
+        for activity, duration_distribution in activities.items():
+            if duration_distribution != []:
+                print(f"mean before: {duration_distribution.mean}")
+                print(f"multiplier: {duration_distribution_multiplier[str(agent)]['multiplier']}")
+                duration_distribution.mean = duration_distribution.mean * duration_distribution_multiplier[str(agent)]['multiplier']
+                print(f"mean after: {duration_distribution.mean}")
 
     return act_duration_distribution_per_agent
 
@@ -758,6 +788,7 @@ def determine_agent_behavior_type_and_extraneous_delays(simulation_parameters, d
             simulation_parameters['transition_probabilities'] = simulation_parameters['transition_probabilities_autonomous']
             simulation_parameters['agent_transition_probabilities'] = simulation_parameters['agent_transition_probabilities_autonomous']
     else:
+        print(f"manually set extraneous delays and architecture")
         if discover_extr_delays_parameter == True:
             simulation_parameters['timers'] = timers_extr
         else:

@@ -15,10 +15,11 @@ def store_preprocessed_data(df_train, df_test, df_val, data_dir):
     df_train_without_end_activity.to_csv(path_to_train_file, index=False)
 
     # save test data
-    path_to_test_file = os.path.join(data_dir,"test_preprocessed.csv")
-    df_test_without_end_activity = df_test.copy()
-    df_test_without_end_activity = df_test_without_end_activity[df_test_without_end_activity['activity_name'] != 'zzz_end']
-    df_test_without_end_activity.to_csv(path_to_test_file, index=False)
+    if df_test is not None:
+        path_to_test_file = os.path.join(data_dir,"test_preprocessed.csv")
+        df_test_without_end_activity = df_test.copy()
+        df_test_without_end_activity = df_test_without_end_activity[df_test_without_end_activity['activity_name'] != 'zzz_end']
+        df_test_without_end_activity.to_csv(path_to_test_file, index=False)
 
     return df_train_without_end_activity
 

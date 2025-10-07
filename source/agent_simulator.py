@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 from source.train_test_split import split_data
 from source.discovery import discover_simulation_parameters
 from source.simulation import simulate_process
@@ -7,7 +8,7 @@ class AgentSimulator:
         self.params = params
 
     def execute_pipeline(self):
-        self.df_train, self.df_test, self.num_cases_to_simulate, self.df_val, self.num_cases_to_simulate_val = self._split_log()
+        self.df_train, self.df_test, self.num_cases_to_simulate, self.df_val, self.num_cases_to_simulate_val = self._split_log(split=False)
         
         # discover basic simulation parameters
         self.df_train, self.simulation_parameters = discover_simulation_parameters(
@@ -27,7 +28,7 @@ class AgentSimulator:
         # simulate process
         simulate_process(self.df_train, self.simulation_parameters, self.data_dir, self.params['num_simulations'])
 
-    def _split_log(self):
+    def _split_log(self, split=True):
         """
         Split the log into training, testing and validation data.
         """
@@ -42,21 +43,29 @@ class AgentSimulator:
         
         file_name = os.path.splitext(os.path.basename(self.params['PATH_LOG']))[0]
         if self.params['determine_automatically']:
-            print("Choice for architecture and extraneous delays will be determined automatically")
-            file_name_extension = 'main_results'
+                print("Choice for architecture and extraneous delays will be determined automatically")
+                file_name_extension = 'main_results'
         else:
             if self.params['central_orchestration']:
                 file_name_extension = 'orchestrated'
             else:
                 file_name_extension = 'autonomous'
-        if self.params['train_and_test']:
-            df_train, df_test, num_cases_to_simulate = split_data(self.params['PATH_LOG'], self.params['column_names'], self.params['PATH_LOG_test'])
-        else:
-            df_train, df_test, num_cases_to_simulate = split_data(self.params['PATH_LOG'], self.params['column_names'])
-
         self.data_dir = os.path.join(os.getcwd(), "simulated_data", file_name, file_name_extension)
+        if split:
+            if self.params['train_and_test']:
+                df_train, df_test, num_cases_to_simulate = split_data(self.params['PATH_LOG'], self.params['column_names'], self.params['PATH_LOG_test'])
+            else:
+                df_train, df_test, num_cases_to_simulate = split_data(self.params['PATH_LOG'], self.params['column_names'])
 
-        df_val = get_validation_data(df_train)
-        num_cases_to_simulate_val = len(set(df_val['case_id']))
+            df_val = get_validation_data(df_train)
+            num_cases_to_simulate_val = len(set(df_val['case_id']))
+        else:
+            df_train = pd.read_csv(self.params['PATH_LOG'])
+            df_train = df_train.rename(columns=self.params['column_names'])
+            df_test = None
+            df_val = None
+            num_cases_to_simulate = int(len(set(df_train['case_id'])))
+            num_cases_to_simulate_val = 0
+
 
         return df_train, df_test, num_cases_to_simulate, df_val, num_cases_to_simulate_val
