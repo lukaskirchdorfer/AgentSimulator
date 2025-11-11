@@ -54,7 +54,7 @@ class AgentSimulator:
         else:
             df_train, df_test, num_cases_to_simulate = split_data(self.params['PATH_LOG'], self.params['column_names'])
 
-        self.data_dir = os.path.join(os.getcwd(), "simulated_data", file_name, file_name_extension)
+        self.data_dir = os.path.join(os.getcwd(), "simulated_data", "ATKDE", file_name, file_name_extension)
 
         df_val = get_validation_data(df_train)
         num_cases_to_simulate_val = len(set(df_val['case_id']))

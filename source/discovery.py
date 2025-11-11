@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import json
 from source.utils import store_preprocessed_data
 from source.agent_types.discover_roles import discover_roles_and_calendars
 from source.agent_types.discover_resource_calendar import discover_calendar_per_agent
@@ -22,7 +23,7 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
     df_train, agent_to_resource = preprocess(df_train)
     df_test, _ = preprocess(df_test)
     df_val, _ = preprocess(df_val)
-    START_TIME = min(df_test.groupby('case_id')['start_timestamp'].min().to_list())
+    START_TIME = min(df_train.groupby('case_id')['start_timestamp'].min().to_list())
     START_TIME_VAL = min(df_val.groupby('case_id')['start_timestamp'].min().to_list())
 
 
@@ -52,8 +53,19 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
 
 
     # sample arrival times for training and validation data
-    case_arrival_times, train_params = get_case_arrival_times(df_train, start_timestamp=START_TIME, num_cases_to_simulate=num_cases_to_simulate, train=True)
-    case_arrival_times_val, _ = get_case_arrival_times(df_val, start_timestamp=START_TIME_VAL, num_cases_to_simulate=num_cases_to_simulate_val, train=False, train_params=train_params)
+    # case_arrival_times, train_params = get_case_arrival_times(df_train, start_timestamp=START_TIME, num_cases_to_simulate=num_cases_to_simulate, train=True)
+
+    with open('arrival_times/ATKDE/Confidential_1000.json', 'r') as f:
+        arrivals = json.load(f)
+
+    case_arrival_times = []
+    for arr in arrivals:
+        # Transform string timestamp to pandas Timestamp
+        timestamp = pd.to_datetime(arr, format='%d.%m.%Y %H:%M:%S', utc=True)
+        case_arrival_times.append(timestamp)
+
+    # case_arrival_times_val, _ = get_case_arrival_times(df_val, start_timestamp=START_TIME_VAL, num_cases_to_simulate=num_cases_to_simulate_val, train=False, train_params=train_params)
+    case_arrival_times_val = None
 
     simulation_parameters = {
         'activity_durations_dict': activity_durations_dict,
@@ -67,7 +79,7 @@ def discover_simulation_parameters(df_train, df_test, df_val, data_dir, num_case
         'transition_probabilities': transition_probabilities,
         'max_activity_count_per_case': max_activity_count_per_case,
         'case_arrival_times': case_arrival_times,
-        'case_arrival_times_val': case_arrival_times_val,
+        # 'case_arrival_times_val': case_arrival_times_val,
         'agent_to_resource': agent_to_resource,
         'determine_automatically': determine_automatically,
         'prerequisites': prerequisites,
