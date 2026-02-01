@@ -3,6 +3,9 @@ from datetime import datetime
 import pytz
 from mesa import Agent
 
+import bisect
+
+
 from source.utils import sample_from_distribution
 
 class ResourceAgent(Agent):
@@ -70,7 +73,8 @@ class ResourceAgent(Agent):
                 # set as busy
                 
                 if activity_duration != 0.0:
-                    self.occupied_times.append((current_timestamp, current_timestamp + pd.Timedelta(seconds=activity_duration)))
+                    # self.occupied_times.append((current_timestamp, current_timestamp + pd.Timedelta(seconds=activity_duration)))
+                    self.add_occupied_slot(current_timestamp, current_timestamp + pd.Timedelta(seconds=activity_duration))
 
                     self.is_busy_until = current_timestamp + pd.Timedelta(seconds=activity_duration)
                     self.is_busy = True
@@ -106,7 +110,8 @@ class ResourceAgent(Agent):
                 # print(f"simulate interruption")
                 # end_time_without_interruptions = current_timestamp + pd.Timedelta(seconds=activity_duration)
                 end_time = self.add_off_time_to_end_time(current_timestamp, activity_duration)
-                self.occupied_times.append((current_timestamp, end_time))
+                # self.occupied_times.append((current_timestamp, end_time))
+                self.add_occupied_slot(current_timestamp, end_time)
                 self.is_busy_until = end_time
                 self.is_busy = True
                 self.model.agents_busy_until[self.resource] = self.is_busy_until
@@ -144,36 +149,51 @@ class ResourceAgent(Agent):
             else:
                 pass # first try if one of the other possible agents is available
 
+
     def is_occupied(self, new_start, activity_duration):
+        if not self.occupied_times:
+            return False
+
         new_end = new_start + pd.Timedelta(seconds=activity_duration)
-        for start, end in self.occupied_times:
-            if new_start < end and new_end > start:
-                return True  # There is an overlap
-        return False  # No overlap found
-    
+
+        # Find where this new_start would sit in the sorted list
+        idx = bisect.bisect_left(self.occupied_times, (new_start, new_end))
+
+        # Check if the PREVIOUS slot ends after our new task starts
+        if idx > 0 and new_start < self.occupied_times[idx - 1][1]:
+            return True
+
+        # Check if the NEXT slot starts before our new task ends
+        if idx < len(self.occupied_times) and new_end > self.occupied_times[idx][0]:
+            return True
+        return False
+
     def get_current_number_multitasking(self, new_start, activity_duration):
         new_end = new_start + pd.Timedelta(seconds=activity_duration)
-        number_multitask = 1 # 1 because we have to add the current activity as well
+        number_multitask = 1  # 1 because we have to add the current activity as well
         for start, end in self.occupied_times:
             if new_start < end and new_end > start:
                 number_multitask += 1
 
         return number_multitask
-    
-    def set_current_time_to_next_available_slot(self,):
-        new_time_set = False
-        current_time = self.contractor_agent.case.current_timestamp
-        self.occupied_times = sorted(self.occupied_times, key=lambda x: x[1])
-        for start, end in self.occupied_times:
-            if end > current_time:
-                self.contractor_agent.case.current_timestamp = end
-                new_time_set = True
-                # print(f"moved time to: {end}")
-                break
-        if new_time_set == False:
-            self.contractor_agent.case.current_timestamp += pd.Timedelta(seconds=60)
-            # print(f"moved time by 60 seconds")
 
+    def add_occupied_slot(self, start, end):
+        # "Wrapper helper" to just insert a slot in the right spot
+        bisect.insort(self.occupied_times, (start, end))
+
+    def set_current_time_to_next_available_slot(self):
+        # Updated func to store already sorted and remove old times
+        current_time = self.contractor_agent.case.current_timestamp
+
+        # Prune 'past' slots to keep the list short 
+        self.occupied_times = [s for s in self.occupied_times if s[1] > current_time]
+
+        if self.occupied_times:
+            # Since it's sorted by start, the first remaining slot
+            # is the most likely candidate for the 'next' end.
+            self.contractor_agent.case.current_timestamp = self.occupied_times[0][1]
+        else:
+            self.contractor_agent.case.current_timestamp += pd.Timedelta(seconds=60)
 
     def start_time_in_calendar(self, current_timestamp):
         day_of_week = current_timestamp.strftime('%A').upper()
