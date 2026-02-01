@@ -73,7 +73,6 @@ class ResourceAgent(Agent):
                 # set as busy
                 
                 if activity_duration != 0.0:
-                    # self.occupied_times.append((current_timestamp, current_timestamp + pd.Timedelta(seconds=activity_duration)))
                     self.add_occupied_slot(current_timestamp, current_timestamp + pd.Timedelta(seconds=activity_duration))
 
                     self.is_busy_until = current_timestamp + pd.Timedelta(seconds=activity_duration)
@@ -110,7 +109,6 @@ class ResourceAgent(Agent):
                 # print(f"simulate interruption")
                 # end_time_without_interruptions = current_timestamp + pd.Timedelta(seconds=activity_duration)
                 end_time = self.add_off_time_to_end_time(current_timestamp, activity_duration)
-                # self.occupied_times.append((current_timestamp, end_time))
                 self.add_occupied_slot(current_timestamp, end_time)
                 self.is_busy_until = end_time
                 self.is_busy = True
